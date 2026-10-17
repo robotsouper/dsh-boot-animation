@@ -1382,7 +1382,7 @@
    *
    * The overlay now mounts before the shell module has run, so the boot page it
    * reads progress and failure from is usually not there yet. It is created inside
-   * `<body>`, so a childList watch on the body sees it arrive.
+   * the document body, so a childList watch on the body sees it arrive.
    * @param fn - called once, with the boot page in the document.
    */
   function whenKernelPage(fn) {
@@ -1401,7 +1401,7 @@
   /**
    * Put the overlay back if the page drops it before the exit.
    *
-   * Mounting this early means the overlay is in `<body>` while the shell builds
+   * Mounting this early means the overlay is in the body while the shell builds
    * its own boot page and the app. Nothing there is known to clear the body, but
    * if anything ever does, the cost would be the kernel page flashing through
    * with no way back — so the overlay is re-appended until it has started leaving.
@@ -1420,13 +1420,19 @@
   }
 
   /**
-   * Run `fn` as soon as `<body>` exists.
+   * Run `fn` as soon as `document.body` exists.
    *
    * This used to wait for DOMContentLoaded, which fires only after the deferred
    * shell module has been fetched and has run — and that module is what draws the
    * kernel boot page. So the kernel page showed first, and only then did this
-   * screen mount and begin loading its clip. The parser creates `<body>` right
-   * after this `<head>` script, well before any module runs; that is the moment.
+   * screen mount and begin loading its clip. The parser creates the body element
+   * right after this head-placed script, well before any module runs; that is the
+   * moment.
+   *
+   * No tag may be spelled out anywhere in this file, comments included: the Host
+   * splices its rows into the index by finding the first body tag in the TEXT, and
+   * one written in a comment here cut this script in two and printed the rest on
+   * the page. verify-options.mjs refuses the file if one comes back.
    * @param fn - called once, with `document.body` present.
    */
   function whenBody(fn) {
