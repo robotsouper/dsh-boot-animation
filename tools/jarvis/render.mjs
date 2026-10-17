@@ -5,7 +5,9 @@
 // OfflineAudioContext. ffmpeg then mixes in voice.mp3 and encodes, with `moov`
 // in front so the clip is faststart from the start.
 //
-// Usage: node tools/jarvis/render.mjs [--fps 60] [--out <dir>] [--install]
+// Usage: node tools/jarvis/render.mjs [--fps 60] [--trim 0.3] [--out <dir>] [--install]
+//   --trim     seconds cut from the head of the sequence (default 0.3): the page
+//              opens on a single dot, and a boot clip should open on something
 //   --out      working directory for frames and the result (default: a fresh
 //              folder under the OS temp dir; ~1 GB of PNGs at 60 fps)
 //   --install  also copy the result to assets/videos/jarvis.mp4
@@ -28,6 +30,7 @@ const option = (name, fallback) => {
 }
 const fps = Number(option('--fps', 60)) || 60
 const outDir = option('--out', null) ?? await mkdtemp(join(tmpdir(), 'jarvis-render-'))
+const trim = Number(option('--trim', 0.3)) || 0
 const VOICE_DELAY_MS = 7200
 const DURATION = 10.4
 
@@ -90,9 +93,12 @@ const rendered = new Promise((resolve) => {
 console.log('frames', await rendered)
 
 // Mix: the voice is delayed onto the waveform window, lightly roomed, and summed
-// with the effects track without normalisation so neither is ducked.
-const mix = `[1:a]adelay=${VOICE_DELAY_MS}|${VOICE_DELAY_MS},highpass=f=90,aecho=0.8:0.6:35|70:0.22|0.12,volume=1.6[v];` +
-  '[2:a]volume=0.9[s];[s][v]amix=inputs=2:normalize=0:duration=first,alimiter=limit=0.95[a]'
+// with the effects track without normalisation so neither is ducked. The trim is
+// applied after the mix, on both streams, so the voice stays on its frames.
+const mix = `[0:v]trim=start=${trim},setpts=PTS-STARTPTS[vv];` +
+  `[1:a]adelay=${VOICE_DELAY_MS}|${VOICE_DELAY_MS},highpass=f=90,aecho=0.8:0.6:35|70:0.22|0.12,volume=1.6[v];` +
+  '[2:a]volume=0.9[s];[s][v]amix=inputs=2:normalize=0:duration=first,alimiter=limit=0.95,' +
+  `atrim=start=${trim},asetpts=PTS-STARTPTS[a]`
 const result = join(outDir, 'jarvis.mp4')
 // Hardware encoders first; libopenh264 is the one every ffmpeg build carries.
 const encoders = [
@@ -106,9 +112,9 @@ const encoded = encoders.some(([codec, ...tune]) => {
     '-hide_banner', '-loglevel', 'error', '-y',
     '-framerate', String(fps), '-i', join(outDir, 'frames', '%05d.png'),
     '-i', join(here, 'voice.mp3'), '-i', join(outDir, 'sfx.wav'),
-    '-filter_complex', mix, '-map', '0:v', '-map', '[a]',
+    '-filter_complex', mix, '-map', '[vv]', '-map', '[a]',
     '-c:v', codec, ...tune, '-pix_fmt', 'yuv420p', '-profile:v', 'high',
-    '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', '-t', String(DURATION), result,
+    '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', '-t', String(DURATION - trim), result,
   ], { stdio: 'inherit' })
   if (run.status === 0) console.log('encoded with', codec)
   return run.status === 0

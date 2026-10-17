@@ -229,8 +229,10 @@ ctx.inject(['slots', 'settingsScope'], (owner) => {
 给地址加 `?dshbootdiag=1`，提示行会变成实时读数：
 
 ```
-diag shown=1 rs=4 muted=true t=3.2 dur=8.1 paused=false ended=false done=0 boot=1 tail=0 fade=2s stall=- err=- audio=refused
+diag shown=1 rs=4 muted=true t=3.2 dur=8.1 paused=false ended=false done=0 boot=1 tail=0 fade=2s stall=- err=- audio=refused ms=12/14/40/41/220
 ```
+
+`ms` = 五个时刻（页面时间，毫秒）：脚本开始 / 覆盖层挂载 / 素材清单返回 / 设置视频地址 / 第一帧显形。「等几秒才开始播」就看哪两格之间差得最多。
 
 `shown` = 画面是否已显形 · `rs` = readyState · `muted` = 是否静音 · `t` = 播放位置 · `dur` = 片子时长 · `paused` / `ended` = 元素自身的状态 · `done` = 片子是否已放完 · `boot` = 内核是否就绪 · **`tail` = 尾部溶解是否已经开始**（`1` 的那一刻 `t` 应该正好是 `dur − 2`） · `fade` = 标称淡入时长 · `stall` = 距上次卡顿多久 · `err` = MediaError 码 · `audio` = 声音策略结果（`ok` / `refused` / `muted-by-user`，关掉声音时是 `disabled`）。
 
