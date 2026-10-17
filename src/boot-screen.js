@@ -739,6 +739,7 @@
   function enter(fadeMs, tail) {
     if (parts.root.getAttribute('data-state') === 'leaving') return
     entered = true
+    scheduleStore()
 
     var span = typeof fadeMs === 'number' && fadeMs > 0
       ? Math.max(Math.min(fadeMs, FADE_MS), 120)
@@ -966,6 +967,7 @@
         + ' stall=' + (namespace.lastStall ? Math.round((Date.now() - namespace.lastStall) / 1000) + 's ago' : '-')
         + ' err=' + (video.error ? video.error.code : '-')
         + ' audio=' + (namespace.audioBlocked === null ? 'ok' : namespace.audioBlocked)
+        + ' src=' + (namespace.source || '-')
         + ' ms=' + [marks.script, marks.mount, marks.manifest, marks.src, marks.frame].map(function (value) {
           return value === null ? '-' : String(value)
         }).join('/')
@@ -1055,6 +1057,7 @@
         // hand-off, so a filter that would empty the pool is dropped rather than
         // obeyed — the same fallback the Host keeps, repeated here because this
         // manifest is the only input this script has.
+        if (previewName === null) clipPool = published
         var clips = published.filter(function (clip) { return clip.enabled !== false })
         if (clips.length === 0) clips = published
         if (clips.length === 0) {
@@ -1271,6 +1274,16 @@
             globalThis.clearTimeout(advance)
             globalThis.clearTimeout(endless)
             var code = video.error ? video.error.code : 0
+            if (video.src.indexOf('blob:') === 0 && clip.noCache !== true) {
+              // The local copy is what failed, not the clip: drop it and play the
+              // same clip from the network instead of moving on to another one.
+              release()
+              forgetClip(clip)
+              clip.noCache = true
+              attempt -= 1
+              tryNext()
+              return
+            }
             noteFailure(clip, 'err' + String(code))
             tryNext()
           }, { once: true })
@@ -1308,18 +1321,29 @@
             namespace.lastStall = Date.now()
           })
 
-          video.src = clip.src
-          if (previewName === null && marks.src === null) marks.src = now()
+          // A blob URL is this page's own copy of the clip; let it go with the clip.
+          var release = function () {
+            if (video.src.indexOf('blob:') === 0) URL.revokeObjectURL(video.src)
+          }
+          video.addEventListener('ended', release, { once: true })
 
-          startClip(video, function () {
-            // Playback started. Deliberately does NOT reveal: leaving the paused
-            // state is not the same fact as having a frame to show, and revealing
-            // here is what used to disarm the watchdog before any picture existed.
-          }, function () {
-            // Neither unmuted nor muted playback started: move to the next clip.
-            globalThis.clearTimeout(advance)
-            globalThis.clearTimeout(endless)
-            tryNext()
+          localClip(clip, function (source) {
+            // A clip superseded while its local copy was being looked up.
+            if (parts.video() !== video) return
+            namespace.source = source === clip.src ? 'net' : 'cache'
+            video.src = source
+            if (previewName === null && marks.src === null) marks.src = now()
+
+            startClip(video, function () {
+              // Playback started. Deliberately does NOT reveal: leaving the paused
+              // state is not the same fact as having a frame to show, and revealing
+              // here is what used to disarm the watchdog before any picture existed.
+            }, function () {
+              // Neither unmuted nor muted playback started: move to the next clip.
+              globalThis.clearTimeout(advance)
+              globalThis.clearTimeout(endless)
+              tryNext()
+            })
           })
 
           // Aim the dissolve at the clip's last frame.
@@ -1375,6 +1399,127 @@
         tryNext()
       })
       .catch(function () { /* an unreachable pool leaves the gradient */ })
+  }
+
+  // ---- local copy of the clip -------------------------------------------------
+  //
+  // The clip route is `no-store` and must stay so (see serveClip in entry.js): the
+  // HTTP cache kept truncated bodies. That made every boot download the whole clip
+  // again, which costs nothing over loopback and seconds over a real network — an
+  // 8 MB clip took 7 s on a remote DSH. So the page keeps its own copy in Cache
+  // Storage, under rules the HTTP cache could not offer:
+  //
+  //   - a copy is written only from a COMPLETE download whose byte count equals the
+  //     manifest's `bytes`, so a fragment can never be stored;
+  //   - it is written after the hand-off, so it never competes with the boot for
+  //     bandwidth;
+  //   - it is keyed by the clip's `src`, which carries the file's revision, so a
+  //     changed file is simply a miss, and entries for other revisions are pruned;
+  //   - a copy that fails to play is deleted and the clip is played from the
+  //     network instead.
+  //
+  // Cache Storage exists only in a secure context (https or localhost); anywhere
+  // else every one of these is a no-op and the clip streams as it always has.
+  var CLIP_CACHE = 'dsh-boot-animation-clips'
+  // How long a lookup may delay the clip before it streams from the network.
+  var CACHE_LOOKUP_MS = 400
+  // How long after the hand-off the copy is fetched, so the app loads first.
+  var CACHE_STORE_DELAY_MS = 4000
+  // The published pool of the boot pass, for pruning entries of removed clips.
+  var clipPool = null
+  var storeScheduled = false
+
+  function cacheStorage() {
+    try {
+      return typeof caches === 'object' && caches !== null && typeof caches.open === 'function' ? caches : null
+    } catch (error) {
+      return null
+    }
+  }
+
+  function absoluteUrl(src) {
+    try {
+      return new URL(src, globalThis.location.href).href
+    } catch (error) {
+      return src
+    }
+  }
+
+  /**
+   * Hand `use` the source to play `clip` from: a blob URL of the stored copy when
+   * there is a complete one, the network `src` otherwise. Without Cache Storage it
+   * answers synchronously, exactly as the screen did before.
+   * @param clip - a manifest entry (`src`, `bytes`).
+   * @param use - called once with the source.
+   */
+  function localClip(clip, use) {
+    var store = cacheStorage()
+    if (store === null || clip.noCache === true || typeof clip.bytes !== 'number') {
+      use(clip.src)
+      return
+    }
+    var answered = false
+    var answer = function (source) {
+      if (answered) {
+        if (source.indexOf('blob:') === 0) URL.revokeObjectURL(source)
+        return
+      }
+      answered = true
+      globalThis.clearTimeout(lookupWindow)
+      use(source)
+    }
+    var lookupWindow = globalThis.setTimeout(function () { answer(clip.src) }, CACHE_LOOKUP_MS)
+    store.open(CLIP_CACHE)
+      .then(function (opened) { return opened.match(absoluteUrl(clip.src)) })
+      .then(function (response) { return response ? response.blob() : null })
+      .then(function (blob) {
+        answer(blob !== null && blob.size === clip.bytes ? URL.createObjectURL(blob) : clip.src)
+      }, function () { answer(clip.src) })
+  }
+
+  /** Drop the stored copy of `clip`, if any. */
+  function forgetClip(clip) {
+    var store = cacheStorage()
+    if (store === null) return
+    store.open(CLIP_CACHE)
+      .then(function (opened) { return opened.delete(absoluteUrl(clip.src)) })
+      .catch(function () {})
+  }
+
+  /**
+   * After the hand-off, store a complete copy of the clip this boot played (when it
+   * came from the network) and prune entries the pool no longer publishes.
+   */
+  function scheduleStore() {
+    if (storeScheduled || previewName !== null) return
+    storeScheduled = true
+    var clip = cache.current
+    var store = cacheStorage()
+    if (store === null || clip === null || typeof clip.bytes !== 'number') return
+    globalThis.setTimeout(function () {
+      var key = absoluteUrl(clip.src)
+      var live = (clipPool || []).map(function (entry) { return absoluteUrl(entry.src) })
+      store.open(CLIP_CACHE).then(function (opened) {
+        var prune = opened.keys().then(function (requests) {
+          return Promise.all(requests.map(function (request) {
+            return live.indexOf(request.url) < 0 ? opened.delete(request) : null
+          }))
+        })
+        if (namespace.source === 'cache' || clip.noCache === true) return prune
+        return prune.then(function () {
+          return fetch(clip.src, { cache: 'no-store' })
+        }).then(function (response) {
+          if (!response.ok || response.status !== 200) return null
+          return response.blob()
+        }).then(function (blob) {
+          // The whole file or nothing: this check is what keeps a fragment out.
+          if (blob === null || blob.size !== clip.bytes) return null
+          return opened.put(key, new Response(blob, {
+            headers: { 'content-type': blob.type || 'video/mp4', 'content-length': String(blob.size) },
+          }))
+        })
+      }).catch(function () { /* quota, private mode: the next boot streams again */ })
+    }, CACHE_STORE_DELAY_MS)
   }
 
   /**
