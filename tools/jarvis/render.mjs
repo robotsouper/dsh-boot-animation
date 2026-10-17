@@ -5,11 +5,17 @@
 // OfflineAudioContext. ffmpeg then mixes in voice.mp3 and encodes, with `moov`
 // in front so the clip is faststart from the start.
 //
-// Usage: node tools/jarvis/render.mjs [--fps 60] [--trim 0.3] [--out <dir>] [--install]
+// Usage: node tools/jarvis/render.mjs [--fps 30] [--mbps 5.2] [--trim 0.3] [--out <dir>] [--install]
+//   --fps      frame rate (default 30)
+//   --mbps     video bitrate (default 5.2, which lands the clip at ~7.7 MB). Measured
+//              against the lossless frames at 30 fps: NVENC two-pass at 5.2 Mbps
+//              scores SSIM 0.9905 / PSNR 46.4 dB, against 0.9948 / 50.5 dB for the
+//              earlier 14 Mbps encode, while OpenH264 and Media Foundation at the
+//              same size only reach SSIM ~0.968 — hence the encoder order below
 //   --trim     seconds cut from the head of the sequence (default 0.3): the page
 //              opens on a single dot, and a boot clip should open on something
 //   --out      working directory for frames and the result (default: a fresh
-//              folder under the OS temp dir; ~1 GB of PNGs at 60 fps)
+//              folder under the OS temp dir; ~500 MB of PNGs at 30 fps)
 //   --install  also copy the result to assets/videos/jarvis.mp4
 // Needs Chrome (or Edge; override with CHROME=<path>) and ffmpeg on PATH.
 // Changing VOICE_DELAY_MS means moving SPEAK_T0/SPEAK_T1 in jarvis.html too.
@@ -28,7 +34,9 @@ const option = (name, fallback) => {
   const i = args.indexOf(name)
   return i >= 0 && args[i + 1] ? args[i + 1] : fallback
 }
-const fps = Number(option('--fps', 60)) || 60
+const fps = Number(option('--fps', 30)) || 30
+const mbps = Number(option('--mbps', 5.2)) || 5.2
+const rate = (factor) => `${Math.round(mbps * factor * 1000)}k`
 const outDir = option('--out', null) ?? await mkdtemp(join(tmpdir(), 'jarvis-render-'))
 const trim = Number(option('--trim', 0.3)) || 0
 const VOICE_DELAY_MS = 7200
@@ -100,12 +108,18 @@ const mix = `[0:v]trim=start=${trim},setpts=PTS-STARTPTS[vv];` +
   '[2:a]volume=0.9[s];[s][v]amix=inputs=2:normalize=0:duration=first,alimiter=limit=0.95,' +
   `atrim=start=${trim},asetpts=PTS-STARTPTS[a]`
 const result = join(outDir, 'jarvis.mp4')
-// Hardware encoders first; libopenh264 is the one every ffmpeg build carries.
+// Best quality per byte first; libopenh264 is the one every ffmpeg build carries.
+// One keyframe for the whole clip (-g 300 at 30 fps): it is played once from the
+// start and never sought, so further keyframes would only spend bits.
 const encoders = [
-  ['h264_nvenc', '-preset', 'p7', '-rc', 'vbr', '-cq', '19', '-b:v', '14M', '-maxrate', '20M'],
-  ['h264_mf', '-b:v', '14M'],
-  ['libx264', '-crf', '17', '-preset', 'slow'],
-  ['libopenh264', '-b:v', '14M', '-maxrate', '20M'],
+  ['h264_nvenc', '-preset', 'p7', '-tune', 'hq', '-rc', 'vbr', '-multipass', 'fullres',
+    '-b:v', rate(1), '-maxrate', rate(1.55), '-bufsize', rate(1.9),
+    '-spatial-aq', '1', '-temporal-aq', '1', '-aq-strength', '8', '-rc-lookahead', '32',
+    '-bf', '3', '-b_ref_mode', 'middle', '-g', '300', '-profile:v', 'high'],
+  ['libx264', '-preset', 'veryslow', '-tune', 'animation', '-b:v', rate(1), '-maxrate', rate(1.55),
+    '-bufsize', rate(1.9), '-g', '300', '-profile:v', 'high'],
+  ['libopenh264', '-b:v', rate(1), '-maxrate', rate(1.55), '-g', '300', '-profile:v', 'high'],
+  ['h264_mf', '-b:v', rate(1), '-g', '300'],
 ]
 const encoded = encoders.some(([codec, ...tune]) => {
   const run = spawnSync('ffmpeg', [
@@ -113,8 +127,8 @@ const encoded = encoders.some(([codec, ...tune]) => {
     '-framerate', String(fps), '-i', join(outDir, 'frames', '%05d.png'),
     '-i', join(here, 'voice.mp3'), '-i', join(outDir, 'sfx.wav'),
     '-filter_complex', mix, '-map', '[vv]', '-map', '[a]',
-    '-c:v', codec, ...tune, '-pix_fmt', 'yuv420p', '-profile:v', 'high',
-    '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', '-t', String(DURATION - trim), result,
+    '-c:v', codec, ...tune, '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', '-t', String(DURATION - trim), result,
   ], { stdio: 'inherit' })
   if (run.status === 0) console.log('encoded with', codec)
   return run.status === 0
