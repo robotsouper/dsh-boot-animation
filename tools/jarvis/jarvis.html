@@ -1,0 +1,486 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>J.A.R.V.I.S. 开机</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  canvas { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); }
+  #ui { position: fixed; inset: 0; display: grid; place-items: center; font: 15px "Microsoft YaHei", system-ui, sans-serif; color: #6fd6ff; }
+  #ui[hidden] { display: none; }
+  #ui .box { text-align: center; }
+  #ui button { background: rgba(111, 214, 255, .08); color: #bfefff; border: 1px solid #6fd6ff; border-radius: 4px; padding: 12px 28px; font: 18px Orbitron, sans-serif; letter-spacing: .15em; cursor: pointer; box-shadow: 0 0 18px rgba(111, 214, 255, .35); }
+  #ui button:hover { background: rgba(111, 214, 255, .18); }
+  #ui label { display: block; margin-top: 14px; color: #7fa9c2; cursor: pointer; }
+</style>
+</head>
+<body>
+<canvas id="c" width="1920" height="1080"></canvas>
+<script>
+'use strict'
+var W = 1920, H = 1080, CX = 960, CY = 540, DUR = 10.4, TAU = Math.PI * 2
+var C = '111,214,255', A = '255,176,64', WHITE = '215,245,255'
+var MONO = '"Share Tech Mono", Consolas, monospace', DISP = 'Orbitron, "Segoe UI", sans-serif'
+
+function col(rgb, a) { return 'rgba(' + rgb + ',' + a + ')' }
+function clamp(x, a, b) { return Math.max(a === undefined ? 0 : a, Math.min(b === undefined ? 1 : b, x)) }
+function prog(t, s, d) { return clamp((t - s) / d) }
+function eo(x) { return 1 - Math.pow(1 - x, 3) }
+function eio(x) { return x < .5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2 }
+function pulse(t, s, d) { var p = (t - s) / d; return p < 0 || p > 1 ? 0 : Math.sin(p * Math.PI) * (1 - p) }
+function rng(seed) {
+  return function () {
+    seed = seed + 0x6D2B79F5 | 0
+    var r = Math.imul(seed ^ seed >>> 15, 1 | seed)
+    r = r + Math.imul(r ^ r >>> 7, 61 | r) ^ r
+    return ((r ^ r >>> 14) >>> 0) / 4294967296
+  }
+}
+
+var cv = document.getElementById('c'), ctx = cv.getContext('2d')
+var layer = document.createElement('canvas'); layer.width = W; layer.height = H
+var L = layer.getContext('2d')
+
+function fit() {
+  var s = Math.max(innerWidth / W, innerHeight / H)
+  cv.style.width = W * s + 'px'; cv.style.height = H * s + 'px'
+}
+addEventListener('resize', fit); fit()
+
+// ---------- static textures ----------
+var grid = (function () {
+  var g = document.createElement('canvas'); g.width = W; g.height = H
+  var x = g.getContext('2d'); x.strokeStyle = col(C, .11); x.lineWidth = 1
+  var s = 26, h = s * Math.sqrt(3)
+  for (var row = -1; row * h / 2 < H + h; row++) {
+    for (var c = -1; c * s * 3 < W + s * 3; c++) {
+      var ox = c * s * 3 + (row % 2 ? s * 1.5 : 0), oy = row * h / 2
+      x.beginPath()
+      for (var i = 0; i < 6; i++) x.lineTo(ox + s * Math.cos(i * Math.PI / 3), oy + s * Math.sin(i * Math.PI / 3))
+      x.closePath(); x.stroke()
+    }
+  }
+  return g
+})()
+var scan = (function () {
+  var p = document.createElement('canvas'); p.width = 4; p.height = 3
+  var x = p.getContext('2d'); x.fillStyle = 'rgba(0,0,0,.55)'; x.fillRect(0, 2, 4, 1)
+  return ctx.createPattern(p, 'repeat')
+})()
+
+// ---------- timeline data ----------
+var RINGS = [
+  { r: 92, w: 2.5, at: 0.9, spd: 0, type: 'solid' },
+  { r: 132, w: 10, at: 1.15, spd: 0.7, type: 'seg', n: 3, gap: 0.3 },
+  { r: 152, w: 1.2, at: 1.3, spd: -0.9, type: 'dash', n: 72, duty: 0.45, alpha: .7 },
+  { r: 178, w: 1.5, at: 1.4, spd: 0, type: 'ticks', n: 180, alpha: .75 },
+  { r: 212, w: 20, at: 1.6, spd: 0.16, type: 'seg', n: 28, gap: 0.42, alpha: .28 },
+  { r: 250, w: 2, at: 1.8, spd: -0.06, type: 'ticks', n: 120 },
+  { r: 290, w: 6, at: 2.0, spd: -0.42, type: 'arcs', arcs: [[0, 1.1], [1.45, 2.05], [2.6, 4.2], [4.65, 5.1]] },
+  { r: 306, w: 1, at: 2.05, spd: -0.42, type: 'arcs', arcs: [[0.3, 2.9], [3.4, 6.0]], alpha: .5 },
+  { r: 338, w: 1.2, at: 2.2, spd: 0.08, type: 'solid', alpha: .45 },
+  { r: 362, w: 1, at: 2.35, spd: -0.11, type: 'text' },
+  { r: 418, w: 3, at: 2.55, spd: 0.28, type: 'arcs', arcs: [[0.2, 0.95], [3.3, 4.05]], amber: true },
+  { r: 432, w: 1, at: 2.6, spd: 0.28, type: 'arcs', arcs: [[0.1, 1.3], [3.2, 4.4]], alpha: .5 },
+  { r: 470, w: 1, at: 2.75, spd: 0.02, type: 'ticks', n: 360, alpha: .3 },
+]
+var RING_TEXT = ' J.A.R.V.I.S.  //  STARK INDUSTRIES  //  SECURE CHANNEL 7  //  ARC CORE SYNC  //'
+var LOG = [
+  ['STARK INDUSTRIES BIOS v9.2', ''],
+  ['MEMORY CHECK', 'OK'],
+  ['ARC REACTOR OUTPUT', '3 GJ/s'],
+  ['NEURAL NETWORK', 'LOADED'],
+  ['SATELLITE UPLINK', 'ESTABLISHED'],
+  ['FIREWALL', 'ACTIVE'],
+  ['MARK VII PROTOCOLS', 'STANDBY'],
+  ['VOICE INTERFACE', 'CALIBRATED'],
+  ['ALL SYSTEMS', 'ONLINE'],
+]
+var LOG_T0 = 2.3, LOG_DT = 0.42
+var SPEAK_T0 = 7.38, SPEAK_T1 = 8.88
+var OUT = 1
+
+// ---------- primitives ----------
+function arcR(g, r, a0, a1, rot, span) {
+  if (a0 >= span) return
+  a1 = Math.min(a1, span)
+  g.beginPath(); g.arc(0, 0, r, a0 + rot - Math.PI / 2, a1 + rot - Math.PI / 2); g.stroke()
+}
+function brackets(g, x, y, w, h, s, a) {
+  g.strokeStyle = col(C, .85 * a); g.lineWidth = 2; g.beginPath()
+  g.moveTo(x, y + s); g.lineTo(x, y); g.lineTo(x + s, y)
+  g.moveTo(x + w - s, y); g.lineTo(x + w, y); g.lineTo(x + w, y + s)
+  g.moveTo(x + w, y + h - s); g.lineTo(x + w, y + h); g.lineTo(x + w - s, y + h)
+  g.moveTo(x + s, y + h); g.lineTo(x, y + h); g.lineTo(x, y + h - s)
+  g.stroke()
+}
+function text(g, s, x, y, font, rgb, a, align, spacing) {
+  g.font = font; g.fillStyle = col(rgb, a); g.textAlign = align || 'left'; g.textBaseline = 'middle'
+  g.letterSpacing = (spacing || 0) + 'px'
+  g.fillText(s, x, y)
+  g.letterSpacing = '0px'
+}
+function typed(s, t, start, cps) { return s.slice(0, Math.max(0, Math.floor((t - start) * (cps || 60)))) }
+
+// ---------- layers ----------
+function rings(g, t) {
+  RINGS.forEach(function (R) {
+    var rev = eo(prog(t, R.at, 0.8)); if (rev <= 0) return
+    var rot = R.spd * t - (1 - rev) * 1.6
+    var rgb = R.amber ? A : C, al = R.alpha || .9
+    g.strokeStyle = col(rgb, al); g.fillStyle = col(rgb, al); g.lineWidth = R.w
+    var span = rev * TAU, i
+    if (R.type === 'solid') arcR(g, R.r, 0, TAU, rot, span)
+    else if (R.type === 'seg' || R.type === 'dash') {
+      var gap = R.type === 'seg' ? R.gap : 1 - R.duty
+      for (i = 0; i < R.n; i++) { var a0 = i / R.n * TAU; arcR(g, R.r, a0, a0 + TAU / R.n * (1 - gap), rot, span) }
+    } else if (R.type === 'arcs') R.arcs.forEach(function (p) { arcR(g, R.r, p[0], p[1], rot, span) })
+    else if (R.type === 'ticks') {
+      g.beginPath()
+      for (i = 0; i < R.n; i++) {
+        var a = i / R.n * TAU; if (a > span) break
+        var len = i % 10 === 0 ? 16 : i % 5 === 0 ? 10 : 5, an = a + rot - Math.PI / 2
+        g.moveTo(Math.cos(an) * R.r, Math.sin(an) * R.r)
+        g.lineTo(Math.cos(an) * (R.r + len), Math.sin(an) * (R.r + len))
+      }
+      g.lineWidth = 1.2; g.stroke()
+    } else if (R.type === 'text') {
+      g.font = '15px ' + MONO; g.textAlign = 'center'; g.textBaseline = 'middle'
+      var step = 13 / R.r, n = Math.floor(TAU / step)
+      for (i = 0; i < n; i++) {
+        var aa = i * step; if (aa > span) break
+        var ch = RING_TEXT[i % RING_TEXT.length]; if (ch === ' ') continue
+        g.save(); g.rotate(aa + rot); g.translate(0, -R.r); g.fillText(ch, 0, 0); g.restore()
+      }
+    }
+  })
+  // markers riding the 290 ring
+  var mr = eo(prog(t, 2.3, 0.6))
+  if (mr > 0) {
+    g.fillStyle = col(WHITE, .9 * mr)
+    ;[0.55, 3.4, 4.9].forEach(function (a) {
+      var an = a - 0.42 * t - Math.PI / 2
+      g.save(); g.rotate(an + Math.PI / 2); g.translate(0, -272)
+      g.beginPath(); g.moveTo(0, 0); g.lineTo(-6, -10); g.lineTo(6, -10); g.closePath(); g.fill(); g.restore()
+    })
+  }
+  // radar-style sweep across the inner band while loading
+  var sw = prog(t, 2.4, 0.4) * (1 - prog(t, 6.0, 0.6))
+  if (sw > 0) {
+    var base = t * 2.6
+    for (var k = 0; k < 24; k++) {
+      g.strokeStyle = col(C, .22 * sw * (1 - k / 24)); g.lineWidth = 46
+      g.beginPath(); g.arc(0, 0, 212, base - k * 0.03, base - k * 0.03 + 0.03); g.stroke()
+    }
+  }
+}
+
+function core(g, t) {
+  var ca = eo(prog(t, 0.6, 0.6)); if (ca <= 0) return
+  var beat = 0.85 + 0.15 * Math.sin(t * 4)
+  var gr = g.createRadialGradient(0, 0, 0, 0, 0, 92)
+  gr.addColorStop(0, col(WHITE, .5 * ca * beat)); gr.addColorStop(.45, col(C, .2 * ca)); gr.addColorStop(1, col(C, 0))
+  g.fillStyle = gr; g.beginPath(); g.arc(0, 0, 92, 0, TAU); g.fill()
+  // voice waveform ring
+  var speak = t > SPEAK_T0 && t < SPEAK_T1 ? Math.sin(prog(t, SPEAK_T0, SPEAK_T1 - SPEAK_T0) * Math.PI) : 0
+  var idle = .6 + .4 * Math.sin(t * 3), N = 120
+  g.strokeStyle = col(WHITE, .85 * ca); g.lineWidth = 2.2; g.beginPath()
+  for (var i = 0; i < N; i++) {
+    var j = Math.min(i, N - i)
+    var nz = Math.abs(Math.sin(j * .37 + t * 13) * Math.sin(j * .11 - t * 7.3) + .35 * Math.sin(j * 1.7 + t * 23))
+    var amp = 2 + idle * 2 + speak * 26 * nz
+    var an = i / N * TAU - Math.PI / 2
+    g.moveTo(Math.cos(an) * 98, Math.sin(an) * 98)
+    g.lineTo(Math.cos(an) * (98 + amp), Math.sin(an) * (98 + amp))
+  }
+  g.stroke()
+  // centre readout
+  var pa = prog(t, 2.4, .4) * (1 - prog(t, 5.9, .4))
+  if (pa > 0) {
+    var pct = Math.floor(eio(prog(t, 2.4, 3.5)) * 100)
+    text(g, 'INITIALIZING', 0, -26, '12px ' + MONO, C, .9 * pa, 'center', 3)
+    g.fillStyle = col('0,10,20', .55 * pa); g.beginPath(); g.arc(0, 0, 70, 0, TAU); g.fill()
+    text(g, pct + '%', 0, 10, '700 38px ' + DISP, C, .8 * pa, 'center', 2)
+  }
+  var oa = prog(t, 6.3, .5)
+  if (oa > 0 && speak < .05) {
+    text(g, 'ONLINE', 0, 0, '700 18px ' + DISP, WHITE, oa * (1 - speak * 20), 'center', 4)
+  }
+}
+
+function intro(g, t) {
+  var a = 1 - prog(t, .65, .4); if (a <= 0) return
+  var w = eo(prog(t, .05, .55)) * W * .7
+  var gr = g.createLinearGradient(CX - w / 2, 0, CX + w / 2, 0)
+  gr.addColorStop(0, col(C, 0)); gr.addColorStop(.5, col(WHITE, a)); gr.addColorStop(1, col(C, 0))
+  g.fillStyle = gr; g.fillRect(CX - w / 2, CY - 1, w, 2)
+  g.fillStyle = col(WHITE, a); g.beginPath(); g.arc(CX, CY, 3 + 6 * pulse(t, .3, .5), 0, TAU); g.fill()
+}
+
+function frame(g, t) {
+  var a = eo(prog(t, .5, .6)) * (1 - prog(t, 8.7, .6)); if (a <= 0) return
+  var w = eo(prog(t, .5, .8))
+  g.strokeStyle = col(C, .6 * a); g.lineWidth = 1
+  g.beginPath(); g.moveTo(CX - w * 880, 56); g.lineTo(CX + w * 880, 56); g.stroke()
+  g.beginPath(); g.moveTo(CX - w * 880, 1024); g.lineTo(CX + w * 880, 1024); g.stroke()
+  text(g, typed('J.A.R.V.I.S. // SYSTEM BOOT SEQUENCE', t, 1.0, 50), 80, 36, '16px ' + MONO, C, a, 'left', 2)
+  var tc = 'T+' + ('0' + Math.floor(t)).slice(-2) + ':' + ('0' + Math.floor(t % 1 * 100)).slice(-2)
+  text(g, tc + '   SECURE', 1840, 36, '16px ' + MONO, C, a, 'right', 2)
+  text(g, 'STARK INDUSTRIES', 80, 1044, '13px ' + MONO, C, .7 * a, 'left', 4)
+  text(g, 'MALIBU POINT 10880', 1840, 1044, '13px ' + MONO, C, .7 * a, 'right', 4)
+  // corner brackets
+  brackets(g, 24, 20, W - 48, H - 40, 40, a)
+}
+
+function leftPanel(g, t) {
+  var a = eo(prog(t, 1.0, .5)) * (1 - prog(t, 8.6, .6)); if (a <= 0) return
+  var x = 70, y = 140
+  brackets(g, x, y, 450, 400, 18, a)
+  text(g, 'SYSTEM DIAGNOSTIC', x + 20, y + 26, '700 15px ' + DISP, WHITE, a, 'left', 3)
+  g.fillStyle = col(C, .5 * a); g.fillRect(x + 20, y + 44, 410 * eo(prog(t, 1.2, .5)), 1)
+  LOG.forEach(function (l, i) {
+    var st = LOG_T0 + i * LOG_DT; if (t < st) return
+    var label = l[1] ? (l[0] + ' ').padEnd(25, '.') + ' ' : l[0]
+    var full = label + l[1], shown = typed(full, t, st, 70)
+    var ly = y + 76 + i * 34
+    text(g, shown.slice(0, label.length), x + 20, ly, '16px ' + MONO, C, .85 * a)
+    if (shown.length > label.length) {
+      g.font = '16px ' + MONO
+      var lw = g.measureText(label).width
+      var ok = /OK|ONLINE|LOADED|ACTIVE|ESTABLISHED|CALIBRATED/.test(l[1])
+      text(g, shown.slice(label.length), x + 20 + lw, ly, '16px ' + MONO, ok ? WHITE : A, a)
+    }
+  })
+  // heartbeat trace
+  var ha = prog(t, 3.0, .5) * a
+  if (ha > 0) {
+    var gy = y + 470
+    brackets(g, x, y + 420, 450, 110, 12, ha)
+    g.strokeStyle = col(C, .9 * ha); g.lineWidth = 1.6; g.beginPath()
+    for (var px = 0; px <= 410; px += 3) {
+      var ph = (px / 410 * 3 - t * 1.2) % 1, v = ph < 0 ? ph + 1 : ph
+      var yy = v > .42 && v < .5 ? -Math.sin((v - .42) / .08 * Math.PI) * 38 : v > .5 && v < .54 ? Math.sin((v - .5) / .04 * Math.PI) * 14 : Math.sin(px * .2 + t * 3) * 1.5
+      px ? g.lineTo(x + 20 + px, gy + yy) : g.moveTo(x + 20 + px, gy + yy)
+    }
+    g.stroke()
+    text(g, 'BIO-MONITOR  72 BPM', x + 20, y + 515, '13px ' + MONO, C, .8 * ha, 'left', 2)
+  }
+}
+
+function rightPanel(g, t) {
+  var a = eo(prog(t, 1.5, .5)) * (1 - prog(t, 8.6, .6)); if (a <= 0) return
+  var x = 1400, y = 140
+  brackets(g, x, y, 450, 400, 18, a)
+  text(g, 'ENVIRONMENT SCAN', x + 20, y + 26, '700 15px ' + DISP, WHITE, a, 'left', 3)
+  // radar
+  var rx = x + 120, ry = y + 160, rr = 90, ra = eo(prog(t, 1.8, .6)) * a
+  g.strokeStyle = col(C, .55 * ra); g.lineWidth = 1
+  ;[1, .66, .33].forEach(function (k) { g.beginPath(); g.arc(rx, ry, rr * k, 0, TAU); g.stroke() })
+  g.beginPath(); g.moveTo(rx - rr, ry); g.lineTo(rx + rr, ry); g.moveTo(rx, ry - rr); g.lineTo(rx, ry + rr); g.stroke()
+  var sa = t * 2.2
+  for (var k = 0; k < 30; k++) {
+    g.fillStyle = col(C, .25 * ra * (1 - k / 30)); g.beginPath(); g.moveTo(rx, ry)
+    g.arc(rx, ry, rr, sa - (k + 1) * .03, sa - k * .03); g.closePath(); g.fill()
+  }
+  var R = rng(7)
+  for (var b = 0; b < 6; b++) {
+    var ba = R() * TAU, bd = 20 + R() * 65, since = ((sa - ba) % TAU + TAU) % TAU
+    g.fillStyle = col(b === 2 ? A : WHITE, ra * Math.max(0, 1 - since / 2.5))
+    g.beginPath(); g.arc(rx + Math.cos(ba) * bd, ry + Math.sin(ba) * bd, 3, 0, TAU); g.fill()
+  }
+  // readouts
+  var lines = ['LAT  34.0259° N', 'LON 118.7798° W', 'ALT  0042 M', 'TEMP 21.4 °C', 'PWR  400 %']
+  lines.forEach(function (s, i) {
+    var st = 2.6 + i * .25; if (t < st) return
+    text(g, typed(s, t, st, 60), x + 240, y + 90 + i * 32, '16px ' + MONO, i === 4 ? A : C, a)
+  })
+  // bars
+  var bA = prog(t, 2.2, .5) * a
+  for (var i = 0; i < 22; i++) {
+    var hgt = 10 + 50 * Math.abs(Math.sin(i * 1.3 + t * 2.1) * Math.cos(i * .7 - t * 1.4))
+    g.fillStyle = col(i % 7 === 3 ? A : C, .75 * bA)
+    g.fillRect(x + 22 + i * 19, y + 370 - hgt * bA, 12, hgt * bA)
+  }
+  // hex stream
+  var hA = prog(t, 2.8, .5) * a
+  if (hA > 0) {
+    brackets(g, x, y + 420, 450, 110, 12, hA)
+    var tick = Math.floor(t * 14)
+    for (var ln = 0; ln < 4; ln++) {
+      var r2 = rng(tick * 31 + ln * 977), s = ''
+      for (var w = 0; w < 8; w++) s += ('000' + Math.floor(r2() * 65535).toString(16).toUpperCase()).slice(-4) + ' '
+      text(g, s, x + 20, y + 446 + ln * 22, '14px ' + MONO, C, (.45 + .4 * (ln === 3)) * hA)
+    }
+  }
+}
+
+var SCRAMBLE = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#%&'
+function title(g, t) {
+  var a = prog(t, 6.2, .2) * (1 - prog(t, 8.7, .5)); if (a <= 0) return
+  var T = 'J.A.R.V.I.S.', y = 868
+  g.font = '700 78px ' + DISP
+  var adv = 62, x0 = CX - (T.length - 1) * adv / 2
+  for (var i = 0; i < T.length; i++) {
+    var settle = 6.3 + i * .07, ch = T[i]
+    if (t < settle - .35) continue
+    if (t < settle && ch !== '.') ch = SCRAMBLE[Math.floor(rng(Math.floor(t * 30) * 13 + i)() * SCRAMBLE.length)]
+    text(g, ch, x0 + i * adv, y, '700 78px ' + DISP, t < settle ? C : WHITE, a, 'center')
+  }
+  var lw = eo(prog(t, 6.5, .7))
+  g.strokeStyle = col(C, .7 * a); g.lineWidth = 1.5
+  g.beginPath(); g.moveTo(CX - 410, y); g.lineTo(CX - 410 - lw * 300, y); g.moveTo(CX + 410, y); g.lineTo(CX + 410 + lw * 300, y); g.stroke()
+  text(g, typed('JUST A RATHER VERY INTELLIGENT SYSTEM', t, 6.8, 55), CX, y + 56, '20px ' + MONO, C, a, 'center', 6)
+  var st = typed('ALL SYSTEMS ONLINE  ·  WELCOME HOME, SIR.', t, 7.25, 38)
+  text(g, st, CX, y + 100, '700 19px ' + DISP, st.length > 18 ? WHITE : A, a, 'center', 4)
+}
+
+function hud(g, t) {
+  intro(g, t)
+  frame(g, t)
+  leftPanel(g, t)
+  rightPanel(g, t)
+  var k = eio(prog(t, 5.9, 1.0)), ex = eio(prog(t, 8.75, 1.3))
+  var s = (1 - .36 * k) * (1 + ex * 2.6)
+  g.save()
+  g.globalAlpha = 1 - prog(t, 8.9, 1.1)
+  g.translate(CX, CY - 80 * k * (1 - ex)); g.scale(s, s)
+  rings(g, t); core(g, t)
+  g.restore()
+  title(g, t)
+}
+
+function draw(t) {
+  OUT = 1 - prog(t, 9.4, 1.0)
+  ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1; ctx.filter = 'none'
+  var bg = ctx.createRadialGradient(CX, CY, 0, CX, CY, 1100)
+  bg.addColorStop(0, '#05192a'); bg.addColorStop(1, '#000')
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H)
+  ctx.globalAlpha = eo(prog(t, .8, 1.5)) * OUT; ctx.drawImage(grid, 0, 0)
+  ctx.globalAlpha = 1
+  var vg = ctx.createRadialGradient(CX, CY, 180, CX, CY, 1000)
+  vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,.95)')
+  ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H)
+
+  L.setTransform(1, 0, 0, 1, 0, 0); L.globalAlpha = 1; L.clearRect(0, 0, W, H)
+  hud(L, t)
+
+  ctx.globalCompositeOperation = 'lighter'
+  ctx.globalAlpha = OUT
+  ctx.filter = 'blur(12px)'; ctx.drawImage(layer, 0, 0)
+  ctx.filter = 'blur(3px)'; ctx.drawImage(layer, 0, 0)
+  ctx.filter = 'none'; ctx.drawImage(layer, 0, 0)
+  var fl = Math.max(pulse(t, .55, .5) * .22, pulse(t, 6.3, .6) * .16, pulse(t, 8.8, .9) * .4)
+  if (fl > 0) { ctx.globalAlpha = 1; ctx.fillStyle = col('170,230,255', fl); ctx.fillRect(0, 0, W, H) }
+  ctx.globalCompositeOperation = 'source-over'
+  ctx.globalAlpha = .35; ctx.fillStyle = scan; ctx.fillRect(0, 0, W, H)
+  ctx.globalAlpha = 1
+}
+window.renderAt = draw
+
+// ---------- sound ----------
+// Schedules every effect on `ac` (a live AudioContext or an OfflineAudioContext
+// for rendering). The voice line is not here: the render mixes it in with ffmpeg.
+function sound(ac, T0) {
+  var master = ac.createGain(); master.gain.value = .9; master.connect(ac.destination)
+  var dl = ac.createDelay(); dl.delayTime.value = .19
+  var fb = ac.createGain(); fb.gain.value = .32; dl.connect(fb); fb.connect(dl)
+  var wet = ac.createGain(); wet.gain.value = .3; dl.connect(wet); wet.connect(master)
+  var bus = ac.createGain(); bus.connect(master); bus.connect(dl)
+  function tone(type, f0, f1, at, dur, vol) {
+    var o = ac.createOscillator(), g = ac.createGain()
+    o.type = type; o.frequency.setValueAtTime(f0, T0 + at)
+    if (f1) o.frequency.exponentialRampToValueAtTime(f1, T0 + at + dur)
+    g.gain.setValueAtTime(0, T0 + at)
+    g.gain.linearRampToValueAtTime(vol, T0 + at + Math.min(.012, dur / 4))
+    g.gain.exponentialRampToValueAtTime(.0001, T0 + at + dur)
+    o.connect(g); g.connect(bus); o.start(T0 + at); o.stop(T0 + at + dur + .05)
+  }
+  var hum = ac.createGain()
+  hum.gain.setValueAtTime(0, T0); hum.gain.linearRampToValueAtTime(.1, T0 + 2.5)
+  hum.gain.setValueAtTime(.1, T0 + 8.6); hum.gain.linearRampToValueAtTime(0, T0 + 10)
+  var lp = ac.createBiquadFilter(); lp.type = 'lowpass'
+  lp.frequency.setValueAtTime(180, T0); lp.frequency.linearRampToValueAtTime(900, T0 + 6)
+  lp.connect(hum); hum.connect(master)
+  ;[55, 110.4, 82.6].forEach(function (f) {
+    var o = ac.createOscillator(); o.type = 'sawtooth'; o.frequency.value = f
+    o.connect(lp); o.start(T0); o.stop(T0 + 10.5)
+  })
+  tone('sine', 60, 1400, .5, 1.8, .16)
+  RINGS.forEach(function (R) { tone('triangle', 1100, 700, R.at, .07, .06) })
+  LOG.forEach(function (_, i) { tone('square', 1900, null, LOG_T0 + i * LOG_DT, .035, .03) })
+  ;[880, 1318.5, 1760, 2637].forEach(function (f, i) { tone('sine', f, null, 6.3 + i * .045, 2.4, .08) })
+  var len = ac.sampleRate * 2, buf = ac.createBuffer(1, len, ac.sampleRate), d = buf.getChannelData(0)
+  for (var i = 0; i < len; i++) d[i] = Math.random() * 2 - 1
+  var n = ac.createBufferSource(); n.buffer = buf
+  var bp = ac.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = 1.2
+  bp.frequency.setValueAtTime(300, T0 + 8.6); bp.frequency.exponentialRampToValueAtTime(5000, T0 + 9.6)
+  var ng = ac.createGain(); ng.gain.setValueAtTime(0, T0 + 8.6)
+  ng.gain.linearRampToValueAtTime(.35, T0 + 9.0); ng.gain.exponentialRampToValueAtTime(.001, T0 + 10.3)
+  n.connect(bp); bp.connect(ng); ng.connect(master); n.start(T0 + 8.6); n.stop(T0 + 10.4)
+}
+
+function wav(buffer) {
+  var ch = buffer.numberOfChannels, len = buffer.length, rate = buffer.sampleRate
+  var out = new DataView(new ArrayBuffer(44 + len * ch * 2))
+  function str(o, s) { for (var i = 0; i < s.length; i++) out.setUint8(o + i, s.charCodeAt(i)) }
+  str(0, 'RIFF'); out.setUint32(4, 36 + len * ch * 2, true); str(8, 'WAVEfmt ')
+  out.setUint32(16, 16, true); out.setUint16(20, 1, true); out.setUint16(22, ch, true)
+  out.setUint32(24, rate, true); out.setUint32(28, rate * ch * 2, true); out.setUint16(32, ch * 2, true); out.setUint16(34, 16, true)
+  str(36, 'data'); out.setUint32(40, len * ch * 2, true)
+  var data = []; for (var c = 0; c < ch; c++) data.push(buffer.getChannelData(c))
+  for (var i = 0, o = 44; i < len; i++) for (c = 0; c < ch; c++, o += 2) {
+    var v = Math.max(-1, Math.min(1, data[c][i])); out.setInt16(o, v < 0 ? v * 32768 : v * 32767, true)
+  }
+  return new Blob([out.buffer], { type: 'audio/wav' })
+}
+
+// ---------- run ----------
+// ?t=<s>  draws one still frame.
+// ?render=<fps>  draws every frame and posts it (and the effects track) to the
+//   render server that served this page; see render.mjs.
+// Otherwise the sequence plays straight away and loops, with no button: a page
+// cannot make sound before a gesture, so a press anywhere turns the effects on.
+var params = new URLSearchParams(location.search)
+function post(path, body) { return fetch(path, { method: 'POST', body: body }) }
+async function render(fps) {
+  var n = Math.round(DUR * fps)
+  for (var i = 0; i < n; i++) {
+    draw(i / fps)
+    var blob = await new Promise(function (ok) { cv.toBlob(ok, 'image/png') })
+    await post('/frame/' + i, blob)
+  }
+  var rate = 48000, off = new OfflineAudioContext(2, Math.ceil(DUR * rate), rate)
+  sound(off, 0)
+  await post('/audio', wav(await off.startRendering()))
+  await post('/done', String(n))
+}
+function play() {
+  var start = performance.now(), ac = null
+  addEventListener('pointerdown', function () {
+    if (ac) return
+    // Restart with sound rather than join mid-way: past events cannot be scheduled.
+    ac = new AudioContext()
+    start = performance.now()
+    sound(ac, ac.currentTime)
+  })
+  ;(function loop(now) {
+    var t = (now - start) / 1000
+    if (t > DUR + 1) {
+      start = now; t = 0
+      if (ac) sound(ac, ac.currentTime)
+    }
+    draw(Math.min(t, DUR))
+    requestAnimationFrame(loop)
+  })(start)
+}
+document.fonts.load('700 20px Orbitron').then(function () { return document.fonts.load('16px "Share Tech Mono"') }).catch(function () {}).then(function () {
+  if (params.has('t')) draw(parseFloat(params.get('t')))
+  else if (params.has('render')) render(parseFloat(params.get('render')) || 60)
+  else play()
+})
+</script>
+</body>
+</html>

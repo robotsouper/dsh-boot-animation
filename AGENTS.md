@@ -131,6 +131,9 @@ tree. What `tools/` holds here is the media and preview tooling:
 | `tools/mp4-audit.mjs` | Whether each clip's index actually points into its own `mdat` |
 | `tools/codec-report.mjs` | The video codec fourcc per clip |
 | `tools/preview.mjs` | Local two-server preview of the injection, without restarting DSH |
+| `tools/jarvis/jarvis.html` | Source of `assets/videos/jarvis.mp4`: a canvas HUD sequence drawn as a pure function of time. Opened directly it loops (a press turns the effects on); `?t=<s>` draws one still frame; `?render=<fps>` is the mode `render.mjs` drives |
+| `tools/jarvis/render.mjs` | Renders `jarvis.html` frame by frame in headless Chrome, mixes in `voice.mp3` with ffmpeg and asserts the result is faststart; `--install` copies it into the pool. Changing its `VOICE_DELAY_MS` means moving `SPEAK_T0`/`SPEAK_T1` in the page too |
+| `tools/jarvis/voice.mjs` | Regenerates `voice.mp3` (en-GB-RyanNeural, Edge online TTS via `msedge-tts`, installed outside this package). Only for changing the line; the mp3 is checked in |
 | `tools/install.ps1` / `tools/uninstall.ps1` | Add or remove the profile link and the patch row. Both name the profile the running DSH uses (`desktop`, not the `web` default) and both must leave `cordis.patch.yml` byte-identical except for the row they own — UTF-8, no BOM, CJK intact. `install.ps1`'s last step only *reports* whether a dsh server answered; it does not repair, and it does not roll back on a port it could not reach. |
 | `tools/install.sh` / `tools/uninstall.sh` | The macOS / Linux twins of the pair above: same two changes, same backup, same UTF-8-safe line handling, plus a schema-version probe (≥ 3.18.4 with `.volatile()`). |b1349df (Add macOS/Linux install support (tools/install.sh + tools/uninstall.sh))
 
@@ -167,6 +170,8 @@ still evaluates when the resolved schema library lacks `.volatile()`.
   list. (The author's working copy enforces it with a `verify-tree-hygiene.mjs`
   suite, which is not part of this tree.)
 - Generated `.ps1` / `.bat` / `.cmd` are **pure ASCII** — content, not filename.
-- The three user clips are the only media the pool should hold; rewrites keep their
+- `jarvis.mp4` is the only media the pool holds (the four earlier clips were removed
+  in a0e7ecb and live in history at a3219ab); to change it, edit
+  `tools/jarvis/jarvis.html` and re-render rather than editing the mp4. Rewrites keep their
   originals in `assets/videos/originals/`, which the pool ignores because it lists
   regular files only.
